@@ -17,6 +17,7 @@ import (
 	"github.com/GMWalletApp/epusdt/model/dao"
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/http_client"
 	"github.com/GMWalletApp/epusdt/util/log"
 	"github.com/GMWalletApp/epusdt/util/sign"
@@ -1080,6 +1081,114 @@ func TestCheckStatus_WithOrder(t *testing.T) {
 				t.Fatalf("status = %d, want %d", got, tc.status)
 			}
 		})
+	}
+}
+
+func TestSubmitTxHash_SuccessUpdatesCheckStatus(t *testing.T) {
+	e := setupTestEnv(t)
+	tradeID := createCheckoutCounterRespTestOrder(t, e, "submit-tx-hash-ok-001")
+
+	verified := false
+	restore := service.SetManualOrderPaymentValidatorForTest(func(order *mdb.Orders, blockID string) (string, error) {
+		verified = true
+		if order.TradeId != tradeID {
+			t.Fatalf("validator trade_id = %s, want %s", order.TradeId, tradeID)
+		}
+		if blockID != "user-submitted-hash" {
+			t.Fatalf("validator block id = %s, want user-submitted-hash", blockID)
+		}
+		return "canonical-user-submitted-hash", nil
+	})
+	defer restore()
+
+	rec := doPost(e, "/pay/submit-tx-hash/"+tradeID, map[string]interface{}{
+		"block_transaction_id": " user-submitted-hash ",
+	})
+	t.Logf("SubmitTxHash(success): status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !verified {
+		t.Fatal("expected chain verifier to be called")
+	}
+
+	var submitResp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &submitResp); err != nil {
+		t.Fatalf("unmarshal submit response: %v", err)
+	}
+	submitData, ok := submitResp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data in submit response, got: %v", submitResp)
+	}
+	if got, _ := submitData["block_transaction_id"].(string); got != "canonical-user-submitted-hash" {
+		t.Fatalf("block_transaction_id = %q", got)
+	}
+	if got := int(submitData["status"].(float64)); got != mdb.StatusPaySuccess {
+		t.Fatalf("submit response status = %d, want %d", got, mdb.StatusPaySuccess)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/pay/check-status/"+tradeID, nil)
+	statusRec := httptest.NewRecorder()
+	e.ServeHTTP(statusRec, req)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("check-status expected 200, got %d: %s", statusRec.Code, statusRec.Body.String())
+	}
+	var statusResp map[string]interface{}
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusResp); err != nil {
+		t.Fatalf("unmarshal check-status response: %v", err)
+	}
+	statusData, ok := statusResp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data in check-status response, got: %v", statusResp)
+	}
+	if got := int(statusData["status"].(float64)); got != mdb.StatusPaySuccess {
+		t.Fatalf("check-status status = %d, want %d", got, mdb.StatusPaySuccess)
+	}
+}
+
+func TestSubmitTxHash_RejectsOkPayOrder(t *testing.T) {
+	e := setupTestEnv(t)
+	order := &mdb.Orders{
+		TradeId:        "trade-submit-tx-hash-okpay",
+		OrderId:        "order-submit-tx-hash-okpay",
+		Amount:         10,
+		Currency:       "CNY",
+		ActualAmount:   1.23,
+		ReceiveAddress: "OKPAY",
+		Token:          "USDT",
+		Network:        mdb.NetworkTron,
+		Status:         mdb.StatusWaitPay,
+		NotifyUrl:      "https://merchant.example/notify",
+		PayProvider:    mdb.PaymentProviderOkPay,
+	}
+	if err := dao.Mdb.Create(order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	called := false
+	restore := service.SetManualOrderPaymentValidatorForTest(func(*mdb.Orders, string) (string, error) {
+		called = true
+		return "canonical-okpay-hash", nil
+	})
+	defer restore()
+
+	rec := doPost(e, "/pay/submit-tx-hash/"+order.TradeId, map[string]interface{}{
+		"block_transaction_id": "okpay-hash",
+	})
+	t.Logf("SubmitTxHash(okpay): status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected failure, got 200: %s", rec.Body.String())
+	}
+	if called {
+		t.Fatal("verifier should not run for OkPay/provider orders")
+	}
+
+	reloaded, err := data.GetOrderInfoByTradeId(order.TradeId)
+	if err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if reloaded.Status != mdb.StatusWaitPay || reloaded.BlockTransactionId != "" {
+		t.Fatalf("order changed after rejected submit: status=%d block=%q", reloaded.Status, reloaded.BlockTransactionId)
 	}
 }
 

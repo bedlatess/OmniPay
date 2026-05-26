@@ -339,6 +339,55 @@ func GetOrderInfoByTradeId(tradeId string) (*mdb.Orders, error) {
 	return order, nil
 }
 
+// SubmitManualPayment verifies a submitted transaction hash and marks the
+// matching on-chain order paid using the same path as automatic chain scans.
+func SubmitManualPayment(tradeId, blockTransactionId string) (*response.ManualPaymentResponse, error) {
+	tradeId = strings.TrimSpace(tradeId)
+	blockTransactionId = strings.TrimSpace(blockTransactionId)
+
+	order, err := GetOrderInfoByTradeId(tradeId)
+	if err != nil {
+		return nil, err
+	}
+	if order.Status != mdb.StatusWaitPay {
+		return nil, constant.OrderNotWaitPay
+	}
+	if !isOnChainOrder(order.PayProvider) {
+		return nil, errors.New("order is not an on-chain payment order")
+	}
+
+	verifiedBlockTransactionID, err := ValidateManualOrderPayment(order, blockTransactionId)
+	if err != nil {
+		return nil, err
+	}
+	if err = OrderProcessing(&request.OrderProcessingRequest{
+		ReceiveAddress:     order.ReceiveAddress,
+		Currency:           order.Currency,
+		Token:              order.Token,
+		Network:            order.Network,
+		Amount:             order.ActualAmount,
+		TradeId:            order.TradeId,
+		BlockTransactionId: verifiedBlockTransactionID,
+	}); err != nil {
+		return nil, err
+	}
+
+	updatedOrder, err := GetOrderInfoByTradeId(order.TradeId)
+	if err != nil {
+		return nil, err
+	}
+	return &response.ManualPaymentResponse{
+		TradeId:            updatedOrder.TradeId,
+		Status:             updatedOrder.Status,
+		BlockTransactionId: updatedOrder.BlockTransactionId,
+	}, nil
+}
+
+func isOnChainOrder(payProvider string) bool {
+	payProvider = strings.TrimSpace(payProvider)
+	return payProvider == "" || payProvider == mdb.PaymentProviderOnChain
+}
+
 const MaxSubOrders = 2
 
 // SwitchNetwork creates or returns an existing sub-order for a different token+network.

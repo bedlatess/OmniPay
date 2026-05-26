@@ -20,3 +20,9 @@ type CheckStatusResponse struct {
 	// 订单状态 1=等待支付 2=支付成功 3=已过期
 	Status int `json:"status" enums:"1,2,3" example:"1"`
 }
+
+type ManualPaymentResponse struct {
+	TradeId            string `json:"trade_id" example:"T2026041612345678"`             // epusdt订单号
+	Status             int    `json:"status" enums:"1,2,3" example:"2"`                 // 订单状态 1=等待支付 2=支付成功 3=已过期
+	BlockTransactionId string `json:"block_transaction_id" example:"0xabc123def456..."` // 已验证并入账的交易哈希
+}
